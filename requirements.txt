@@ -1,0 +1,4 @@
+diffusers==0.12.1
+transformers==4.28.0
+gradio
+accelerate
