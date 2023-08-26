@@ -82,7 +82,7 @@ python gradio_app.py
 
 ### Benchmark
 
-We share the benchmark used in our model development and evlauation [here](./dataset).
+We share the benchmark used in our model development and evaluation [here](./dataset).
 The code for preprocessing segment conditions is in [here](./inference.ipynb).
 
 ---
