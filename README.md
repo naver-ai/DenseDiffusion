@@ -1,4 +1,4 @@
-## Dense Text-to-Image Generation with Attention Modulation [[Paper](https://arxiv.org/abs/2308.12964)]<br>
+## Dense Text-to-Image Generation with Attention Modulation [[Paper](https://arxiv.org/abs/2308.12964)] (ICCV 2023) <br>
 > #### Authors &emsp;&emsp; [Yunji Kim](https://github.com/YunjiKim)<sup>1</sup>, [Jiyoung Lee](https://lee-jiyoung.github.io)<sup>1</sup>, [Jin-Hwa Kim](http://wityworks.com/)<sup>1</sup>, [Jung-Woo Ha](https://github.com/jungwoo-ha)<sup>1</sup>, [Jun-Yan Zhu](https://www.cs.cmu.edu/~junyanz/)<sup>2</sup> <br> <sub> &emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp; <sup>1</sup>NAVER AI Lab, <sup>2</sup>Carnegie Mellon University </sub>
 
 > #### Abstract
