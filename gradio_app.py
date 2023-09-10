@@ -4,19 +4,27 @@ import torch
 import requests 
 import random
 import os
+import sys
 import pickle
+from PIL import Image
 
 from tqdm.auto import tqdm
 from datetime import datetime
 
-from diffusers.pipelines.stable_diffusion import StableDiffusionPipeline
+import diffusers
 from diffusers import DDIMScheduler
 from transformers import CLIPTextModel, CLIPTokenizer
 import torch.nn.functional as F
 
 from utils import preprocess_mask, process_sketch, process_prompts, process_example
 
-MAX_COLORS = 12
+
+#################################################
+#################################################
+### check diffusers version
+if diffusers.__version__ != '0.20.2':
+    print("Please use diffusers v0.20.2")
+    sys.exit(0)
 
 
 #################################################
@@ -64,12 +72,19 @@ creg_maps = {}
 sreg_maps = {}
 text_cond = 0
 device="cuda"
+MAX_COLORS = 12
 
-pipe = StableDiffusionPipeline.from_pretrained(
-  "runwayml/stable-diffusion-v1-5",
-  cache_dir='./models/diffusers/',
-  use_auth_token=HF_TOKEN).to(device)
-pipe.safety_checker = lambda images, clip_input: (images, False)
+MODEL_NAME = "runwayml/stable-diffusion-v1-5"
+CACHE_DIR = './models/diffusers/'
+HF_TOKEN = ''
+
+pipe = diffusers.StableDiffusionPipeline.from_pretrained(
+        MODEL_NAME,
+        safety_checker=None,
+        variant="fp16",
+        cache_dir=CACHE_DIR,
+        use_auth_token=HF_TOKEN).to(device)
+
 pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config)
 pipe.scheduler.set_timesteps(50)
 timesteps = pipe.scheduler.timesteps
@@ -81,23 +96,41 @@ val_layout = './dataset/valset_layout/'
 
 #################################################
 #################################################
-def mod_forward(self, hidden_states, encoder_hidden_states=None, attention_mask=None):
-    
-    batch_size, sequence_length, _ = hidden_states.shape
-    attention_mask = self.prepare_attention_mask(attention_mask, sequence_length)
+def mod_forward(self, hidden_states, encoder_hidden_states=None, attention_mask=None, temb=None):
+
+    residual = hidden_states
+
+    if self.spatial_norm is not None:
+        hidden_states = self.spatial_norm(hidden_states, temb)
+
+    input_ndim = hidden_states.ndim
+
+    if input_ndim == 4:
+        batch_size, channel, height, width = hidden_states.shape
+        hidden_states = hidden_states.view(batch_size, channel, height * width).transpose(1, 2)
+
+    batch_size, sequence_length, _ = (hidden_states.shape if encoder_hidden_states is None else encoder_hidden_states.shape)
+    attention_mask = self.prepare_attention_mask(attention_mask, sequence_length, batch_size)
+
+    if self.group_norm is not None:
+        hidden_states = self.group_norm(hidden_states.transpose(1, 2)).transpose(1, 2)
 
     query = self.to_q(hidden_states)
-    query = self.head_to_batch_dim(query)
+
+    global sreg, creg, COUNT, creg_maps, sreg_maps, reg_sizes, text_cond
     
-    global text_cond
-    context_states = text_cond if encoder_hidden_states is not None else hidden_states
-    key = self.to_k(context_states)
-    value = self.to_v(context_states)
+    sa_ = True if encoder_hidden_states is None else False
+    encoder_hidden_states = text_cond if encoder_hidden_states is not None else hidden_states
+        
+    if self.norm_cross:
+        encoder_hidden_states = self.norm_encoder_hidden_states(encoder_hidden_states)
+
+    key = self.to_k(encoder_hidden_states)
+    value = self.to_v(encoder_hidden_states)
+
+    query = self.head_to_batch_dim(query)
     key = self.head_to_batch_dim(key)
     value = self.head_to_batch_dim(value)
-    
-    global sreg, creg, COUNT, creg_maps, sreg_maps, reg_sizes
-    COUNT += 1
     
     if COUNT/32 < 50*0.3:
         
@@ -113,7 +146,7 @@ def mod_forward(self, hidden_states, encoder_hidden_states=None, attention_mask=
         treg = torch.pow(timesteps[COUNT//32]/1000, 5)
         
         ## reg at self-attn
-        if encoder_hidden_states is None:
+        if sa_:
             min_value = sim[int(sim.size(0)/2):].min(-1)[0].unsqueeze(-1)
             max_value = sim[int(sim.size(0)/2):].max(-1)[0].unsqueeze(-1)  
             mask = sreg_maps[sim.size(1)].repeat(self.heads,1,1)
@@ -137,6 +170,8 @@ def mod_forward(self, hidden_states, encoder_hidden_states=None, attention_mask=
             
     else:
         attention_probs = self.get_attention_scores(query, key, attention_mask)
+           
+    COUNT += 1
             
     hidden_states = torch.bmm(attention_probs, value)
     hidden_states = self.batch_to_head_dim(hidden_states)
@@ -146,10 +181,18 @@ def mod_forward(self, hidden_states, encoder_hidden_states=None, attention_mask=
     # dropout
     hidden_states = self.to_out[1](hidden_states)
 
+    if input_ndim == 4:
+        hidden_states = hidden_states.transpose(-1, -2).reshape(batch_size, channel, height, width)
+
+    if self.residual_connection:
+        hidden_states = hidden_states + residual
+
+    hidden_states = hidden_states / self.rescale_output_factor
+
     return hidden_states
 
 for _module in pipe.unet.modules():
-    if _module.__class__.__name__ == "CrossAttention":
+    if _module.__class__.__name__ == "Attention":
         _module.__class__.__call__ = mod_forward
 
         
@@ -179,31 +222,39 @@ def process_generation(binary_matrixes, seed, creg_, sreg_, sizereg_, bsz, maste
     global sreg_maps, reg_sizes
     sreg_maps = {}
     reg_sizes = {}
+    
     for r in range(4):
-        layouts_s = F.interpolate(layouts,(np.power(2,r+3),np.power(2,r+3)),mode='nearest')
+        res = int(sp_sz/np.power(2,r))
+        layouts_s = F.interpolate(layouts,(res, res),mode='nearest')
         layouts_s = (layouts_s.view(layouts_s.size(0),1,-1)*layouts_s.view(layouts_s.size(0),-1,1)).sum(0).unsqueeze(0).repeat(bsz,1,1)
-        reg_sizes[np.power(2,(r+3)*2)] = 1-sizereg*layouts_s.sum(-1, keepdim=True)/(np.power(2,(r+3)*2))
-        sreg_maps[np.power(2,(r+3)*2)] = layouts_s
+        reg_sizes[np.power(res, 2)] = 1-sizereg*layouts_s.sum(-1, keepdim=True)/(np.power(res, 2))
+        sreg_maps[np.power(res, 2)] = layouts_s
 
 
     ###########################
     ###### prep for creg ######
     ###########################
-    pww_maps = torch.zeros(1,77,64,64).to(device)
+    pww_maps = torch.zeros(1,77,sp_sz,sp_sz).to(device)
     for i in range(1,len(prompts)):
         wlen = text_input['length'][i] - 2
         widx = text_input['input_ids'][i][1:1+wlen]
         for j in range(77):
-            if (text_input['input_ids'][0][j:j+wlen] == widx).sum() == wlen:
-                pww_maps[:,j:j+wlen,:,:] = layouts[i-1:i]
-                cond_embeddings[0][j:j+wlen] = cond_embeddings[i][1:1+wlen]
-                break
-
+            try:
+                if (text_input['input_ids'][0][j:j+wlen] == widx).sum() == wlen:
+                    pww_maps[:,j:j+wlen,:,:] = layouts[i-1:i]
+                    if MODEL_NAME == "runwayml/stable-diffusion-v1-5":
+                        cond_embeddings[0][j:j+wlen] = cond_embeddings[i][1:1+wlen]
+                    break
+            except:
+                raise gr.Error("Please check whether every segment prompt is included in the full text !")
+                return
+    
     global creg_maps
     creg_maps = {}
     for r in range(4):
-        layout_c = F.interpolate(pww_maps,(np.power(2,r+3),np.power(2,r+3)),mode='nearest').view(1,77,-1).permute(0,2,1).repeat(bsz,1,1)
-        creg_maps[np.power(2,(r+3)*2)] = layout_c
+        res = int(sp_sz/np.power(2,r))
+        layout_c = F.interpolate(pww_maps,(res,res),mode='nearest').view(1,77,-1).permute(0,2,1).repeat(bsz,1,1)
+        creg_maps[np.power(res, 2)] = layout_c
 
 
     ###########################    
@@ -216,9 +267,9 @@ def process_generation(binary_matrixes, seed, creg_, sreg_, sizereg_, bsz, maste
     COUNT = 0
     
     if seed == -1:
-        latents = torch.randn(bsz,4,64,64).to(device)
+        latents = torch.randn(bsz,4,sp_sz,sp_sz).to(device)
     else:
-        latents = torch.randn(bsz,4,64,64, generator=torch.Generator().manual_seed(seed)).to(device)
+        latents = torch.randn(bsz,4,sp_sz,sp_sz, generator=torch.Generator().manual_seed(seed)).to(device)
         
     image = pipe(prompts[:1]*bsz, latents=latents).images
 
@@ -230,15 +281,16 @@ def process_generation(binary_matrixes, seed, creg_, sreg_, sizereg_, bsz, maste
 ### define the interface
 with gr.Blocks(css=css) as demo:
     binary_matrixes = gr.State([])
+    color_layout = gr.State([])
     gr.Markdown('''## DenseDiffusion: Dense Text-to-Image Generation with Attention Modulation''')
     gr.Markdown('''
-    #### 😺 Instruction to generate images 😺
-    (1) Sketch the layout of the image.
-    (2) Label each segment with text description.
-    (3) Adjust the text, which is the integration of segments separated by commas, keeping in mind that the sentence should include every segments. (Default sentence works as well, but using it might be leading to the genration of less pleasing images.)
-    (4) Check the generated images, and tune the hyperparameters if needed.
-    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; - w<sup>c</sup> : The degree of attention modulation at cross-attention layers.
-    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; - w<sup>s</sup> : The degree of attention modulation at self-attention layers.
+    #### 😺 Instruction to generate images 😺 <br>
+    (1) Create the image layout. <br>
+    (2) Label each segment with a text prompt. <br>
+    (3) Adjust the full text. The default full text is automatically concatenated from each segment's text. The default one works well, but refineing the full text will further improve the result. <br>
+    (4) Check the generated images, and tune the hyperparameters if needed. <br>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; - w<sup>c</sup> : The degree of attention modulation at cross-attention layers. <br>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; - w<sup>s</sup> : The degree of attention modulation at self-attention layers. <br>
     ''')
     
     with gr.Row():
@@ -269,7 +321,7 @@ with gr.Blocks(css=css) as demo:
                     creg_ = gr.Slider(label=" w\u1D9C (The degree of attention modulation at cross-attention layers) ", minimum=0, maximum=2., value=1.0, step=0.1)
                     sreg_ = gr.Slider(label=" w \u02E2 (The degree of attention modulation at self-attention layers) ", minimum=0, maximum=2., value=0.3, step=0.1)
                     sizereg_ = gr.Slider(label="The degree of mask-area adaptive adjustment", minimum=0, maximum=1., value=1., step=0.1)
-                    bsz_ = gr.Slider(label="Number of Samples to generate", minimum=1, maximum=4, value=2, step=1)
+                    bsz_ = gr.Slider(label="Number of Samples to generate", minimum=1, maximum=4, value=1, step=1)
                     seed_ = gr.Slider(label="Seed", minimum=-1, maximum=999999999, value=-1, step=1)
                     
                 final_run_btn = gr.Button("Generate ! 😺")
@@ -288,11 +340,11 @@ with gr.Blocks(css=css) as demo:
     
     gr.Examples(
         examples=[[val_layout + '0.png',
-                   '***'.join([val_prompt[0]['textual_condition']] + val_prompt[0]['segment_descriptions']), 131363121],
+                   '***'.join([val_prompt[0]['textual_condition']] + val_prompt[0]['segment_descriptions']), 381940206],
                   [val_layout + '1.png',
-                   '***'.join([val_prompt[1]['textual_condition']] + val_prompt[1]['segment_descriptions']), 212669682],
+                   '***'.join([val_prompt[1]['textual_condition']] + val_prompt[1]['segment_descriptions']), 307504592],
                   [val_layout + '5.png',
-                   '***'.join([val_prompt[5]['textual_condition']] + val_prompt[5]['segment_descriptions']), 96554487]],
+                   '***'.join([val_prompt[5]['textual_condition']] + val_prompt[5]['segment_descriptions']), 114972190]],
         inputs=[layout_path, all_prompts, seed_],
         outputs=[post_sketch, binary_matrixes, *color_row, *colors, *prompts, gen_prompt_vis, general_prompt, seed_],
         fn=process_example,
