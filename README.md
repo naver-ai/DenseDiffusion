@@ -44,7 +44,7 @@ To maintain the pre-trained model's generation capacity, we design the modulatio
 
 ### How to launch a web interface
 
-- Put your access token to Hugging Face Hub [here](./gradio_app.py#L71).
+- Put your access token to Hugging Face Hub [here](./gradio_app.py#L77).
 
 - Run the Gradio app.
 ```
