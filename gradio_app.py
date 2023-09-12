@@ -74,15 +74,12 @@ text_cond = 0
 device="cuda"
 MAX_COLORS = 12
 
-MODEL_NAME = "runwayml/stable-diffusion-v1-5"
-CACHE_DIR = './models/diffusers/'
 HF_TOKEN = ''
 
 pipe = diffusers.StableDiffusionPipeline.from_pretrained(
-        MODEL_NAME,
-        safety_checker=None,
+        "runwayml/stable-diffusion-v1-5",
         variant="fp16",
-        cache_dir=CACHE_DIR,
+        cache_dir='./models/diffusers/',
         use_auth_token=HF_TOKEN).to(device)
 
 pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config)
@@ -242,8 +239,7 @@ def process_generation(binary_matrixes, seed, creg_, sreg_, sizereg_, bsz, maste
             try:
                 if (text_input['input_ids'][0][j:j+wlen] == widx).sum() == wlen:
                     pww_maps[:,j:j+wlen,:,:] = layouts[i-1:i]
-                    if MODEL_NAME == "runwayml/stable-diffusion-v1-5":
-                        cond_embeddings[0][j:j+wlen] = cond_embeddings[i][1:1+wlen]
+                    cond_embeddings[0][j:j+wlen] = cond_embeddings[i][1:1+wlen]
                     break
             except:
                 raise gr.Error("Please check whether every segment prompt is included in the full text !")
@@ -306,11 +302,11 @@ with gr.Blocks(css=css) as demo:
                 for n in range(MAX_COLORS):
                     if n == 0 :
                         with gr.Row(visible=False) as color_row[n]:
-                            colors.append(gr.Image(shape=(100, 100), label="background", type="pil", image_mode="RGB").style(width=100, height=100))
+                            colors.append(gr.Image(shape=(100, 100), label="background", type="pil", image_mode="RGB", width=100, height=100))
                             prompts.append(gr.Textbox(label="Prompt for the background (white region)", value=""))
                     else:
                         with gr.Row(visible=False) as color_row[n]:
-                            colors.append(gr.Image(shape=(100, 100), label="segment "+str(n), type="pil", image_mode="RGB").style(width=100, height=100))
+                            colors.append(gr.Image(shape=(100, 100), label="segment "+str(n), type="pil", image_mode="RGB", width=100, height=100))
                             prompts.append(gr.Textbox(label="Prompt for the segment "+str(n)))
                     
                 get_genprompt_run = gr.Button("(2) I've finished segment labeling ! 😺", elem_id="prompt_button", interactive=True)
@@ -330,7 +326,7 @@ with gr.Blocks(css=css) as demo:
                 all_prompts = gr.Textbox(label="all_prompts", visible=False)
                 
         with gr.Column():
-            out_image = gr.Gallery(label="Result", ).style(columns=2, height='auto')
+            out_image = gr.Gallery(label="Result", columns=2, height='auto')
             
     button_run.click(process_sketch, inputs=[canvas_data], outputs=[post_sketch, binary_matrixes, *color_row, *colors], _js=get_js_colors, queue=False)
     
