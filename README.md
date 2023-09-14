@@ -53,6 +53,15 @@ python gradio_app.py
 
 ----
 
+### Web Demo
+
+- **Colab Version** [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/XandrChris/DenseDiffusionColab/blob/main/DenseDiffusionColab.ipynb)
+- The Colab Version is available at [DenseDiffusionColab](https://gihub.com/XandrChris/DenseDiffusionColab)
+
+
+----
+
+
 ### Getting Started
 
 - Create the image layout.
